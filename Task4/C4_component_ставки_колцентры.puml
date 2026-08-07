@@ -1,0 +1,81 @@
+@startuml
+title Диаграмма компонентов. Публикация ставок для кол-центра банка и партнёрского кол-центра
+
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_TOP_DOWN()
+
+Person(boCredit, "Сотрудник бэк-офиса кредитов", "Параметры расчёта ставок")
+Person(boDeposit, "Сотрудник бэк-офиса депозитов", "Согласование ставок")
+Person(ccOperator, "Оператор кол-центра банка", "Консультирует по ставкам")
+Person(partnerOperator, "Оператор партнёрского кол-центра", "Консультирует по ставкам")
+
+Container(gateway, "API Gateway", "Spring Cloud Gateway", "Единая точка входа, TLS, аутентификация, лимиты")
+Container(rateUi, "Интерфейс управления ставками", "React.js", "Экраны бэк-офисов")
+
+Container_Boundary(rateSvcB, "Сервис ставок (Java 17, Spring Boot)") {
+  Component(rateApi, "REST-контроллер ставок", "Spring MVC", "Отдаёт актуальные ставки каналам и системе кол-центра")
+  Component(rateCalc, "Калькулятор базовых ставок", "Java", "Считает ставки по ставке рефинансирования и уровню кредитного риска")
+  Component(rateRepo, "Репозиторий ставок", "Spring Data JPA", "Чтение и запись справочника")
+  Component(rateAudit, "Журнал изменений", "Java", "Фиксирует автора и время каждого изменения ставки")
+  Component(rateAcl, "Контроль доступа по ролям", "Spring Security", "Разделяет данные бэк-офиса депозитов и бэк-офиса кредитов")
+  Component(ratePub, "Публикатор событий", "Spring Kafka", "Публикует новую версию справочника в топик deposit.rates")
+  Component(rateCache, "Кеш ставок", "Caffeine, в памяти", "Отдача справочника за миллисекунды")
+}
+
+ContainerDb(rateDb, "БД ставок", "PostgreSQL", "Справочник, параметры расчёта, история изменений")
+Container(kafka, "Kafka", "Apache Kafka", "Топик deposit.rates")
+
+Container_Boundary(exportB, "Сервис публикации ставок (Java 17, Spring Boot)") {
+  Component(expConsumer, "Потребитель топика", "Spring Kafka", "Реагирует на изменение справочника")
+  Component(expScheduler, "Планировщик выгрузки", "Spring Scheduler", "Гарантированная выгрузка не реже раза в сутки")
+  Component(expSnapshot, "Сборщик снимка", "Java", "Формирует полный срез публичных ставок на момент времени")
+  Component(expFile, "Формировщик файла", "Java", "CSV со ставками и манифест: версия, метка времени, число строк")
+  Component(expSign, "Контрольная сумма и подпись", "Java", "SHA-256 и подпись файла для контроля целостности")
+  Component(expSftp, "Клиент выгрузки", "Apache Commons VFS", "Кладёт файл и манифест в SFTP-каталог")
+  Component(expLog, "Журнал выгрузок", "Java", "Что выгружено, когда, забрал ли партнёр")
+}
+
+Container(sftp, "SFTP-каталог", "SFTP-сервер в DMZ", "Только чтение для партнёра, доступ по ключу")
+
+Container_Boundary(ccB, "Система кол-центра (платформа подрядчика)") {
+  Component(ccWidget, "Виджет актуальных ставок", "React.js", "Показывает ставки в карточке обращения")
+  Component(ccClient, "Клиент API ставок", "Java Spring Boot", "Запрашивает ставки, кеширует последний успешный ответ")
+}
+
+System_Ext(partnerCallCenter, "Система партнёрского кол-центра", "Внешняя система партнёра")
+
+Rel(boCredit, rateUi, "Вводит ставку рефинансирования и уровень кредитного риска", "HTTPS")
+Rel(boDeposit, rateUi, "Согласует ставки. Данные кредитного риска не видит", "HTTPS")
+Rel(rateUi, gateway, "Запросы управления справочником", "REST/HTTPS")
+Rel(gateway, rateApi, "Маршрутизирует запросы", "REST")
+
+Rel(rateApi, rateAcl, "Проверяет роль и состав полей", "")
+Rel(rateApi, rateCache, "Читает актуальный справочник", "")
+Rel(rateApi, rateCalc, "Запускает пересчёт при изменении параметров", "")
+Rel(rateCalc, rateRepo, "Сохраняет рассчитанные ставки", "")
+Rel(rateRepo, rateDb, "Читает и пишет", "JDBC")
+Rel(rateRepo, rateAudit, "Передаёт изменение на фиксацию", "")
+Rel(rateAudit, rateDb, "Пишет историю", "JDBC")
+Rel(rateRepo, rateCache, "Инвалидирует кеш", "")
+Rel(rateRepo, ratePub, "Сообщает о новой версии справочника", "")
+Rel(ratePub, kafka, "Публикует версию справочника", "deposit.rates")
+
+Rel(ccClient, gateway, "Запрашивает актуальные ставки", "REST/HTTPS")
+Rel(ccWidget, ccClient, "Получает ставки для отображения", "")
+Rel(ccOperator, ccWidget, "Смотрит ставки в карточке обращения", "Веб-интерфейс")
+
+Rel(expConsumer, kafka, "Читает версию справочника", "deposit.rates")
+Rel(expConsumer, expSnapshot, "Инициирует выгрузку по изменению", "")
+Rel(expScheduler, expSnapshot, "Инициирует выгрузку по расписанию", "")
+Rel(expSnapshot, gateway, "Запрашивает публичный срез ставок", "REST/HTTPS")
+Rel(expSnapshot, expFile, "Передаёт срез на формирование", "")
+Rel(expFile, expSign, "Считает контрольную сумму и подписывает", "")
+Rel(expSign, expSftp, "Передаёт файл и манифест", "")
+Rel(expSftp, sftp, "Кладёт файл и манифест", "SFTP")
+Rel(expSftp, expLog, "Фиксирует факт выгрузки", "")
+
+Rel(partnerCallCenter, sftp, "Забирает файл по расписанию", "SFTP, только чтение")
+Rel(partnerOperator, partnerCallCenter, "Смотрит ставки из последнего файла", "Веб-интерфейс")
+
+@enduml

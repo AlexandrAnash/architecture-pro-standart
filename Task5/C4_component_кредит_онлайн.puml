@@ -1,0 +1,83 @@
+@startuml
+title Диаграмма компонентов. Кредитная платформа: заявки из каналов и предодобренные предложения
+
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_TOP_DOWN()
+
+Person(client, "Клиент", "Подаёт заявку с сайта или из интернет-банка")
+Person(manager, "Менеджер отделения", "Оформляет заявку при визите")
+
+Container(siteWeb, "Витрина кредитов на сайте", "PHP, React.js", "Условия кредита и форма заявки")
+Container(creditModule, "Кредитный модуль интернет-банка", "React.js, SPA", "Предодобренное предложение, подача заявки, ввод СМС-кода")
+Container(gateway, "API Gateway", "Spring Cloud Gateway", "Точка входа, TLS, аутентификация, лимиты")
+
+Container_Boundary(appB, "Сервис кредитных заявок (Java 17, Spring Boot)") {
+  Component(appApi, "REST-контроллер заявок", "Spring MVC", "Приём заявок из каналов и запросов статуса")
+  Component(appRegistry, "Реестр заявок", "Spring Data JPA", "Единый идентификатор заявки и клиента для всех каналов")
+  Component(appIdem, "Контроль дублей", "Java", "Идемпотентный ключ, поиск активной заявки по телефону и паспорту")
+  Component(appRouter, "Маршрутизатор", "Java", "Определяет путь: онлайн в Кредитный конвейер или через АБС")
+  Component(appStatus, "Обработчик статусов", "Spring Kafka", "Читает статусы из топика, обновляет заявку, запускает уведомление")
+}
+
+ContainerDb(appDb, "БД кредитных заявок", "PostgreSQL", "Заявки, каналы подачи, статусы, история")
+
+Container_Boundary(offerB, "Сервис предодобренных предложений (Java 17, Spring Boot)") {
+  Component(offerConsumer, "Потребитель результатов скоринга", "Spring Kafka", "Забирает результаты скорингов, выполненных по другим поводам. Сам скоринг не инициирует")
+  Component(offerStore, "Хранилище последних результатов", "Spring Data JPA", "Последний известный скоринг клиента и дата расчёта")
+  Component(offerCalc, "Расчёт доступной суммы", "Java", "Считает сумму предложения по сохранённому скорингу и условиям продукта")
+  Component(offerTtl, "Контроль срока годности", "Java", "Скрывает предложение, если результат скоринга устарел")
+  Component(offerApi, "API предложений", "Spring MVC", "Отдаёт предложение каналу или пустой ответ")
+}
+
+ContainerDb(offerDb, "БД предложений", "PostgreSQL", "Результаты скоринга, рассчитанные суммы, сроки годности")
+
+Container(kafka, "Kafka", "Apache Kafka", "Топики credit.applications, credit.status, scoring.results")
+Container(notifySvc, "Сервис уведомлений и кодов", "Java 17, Spring Boot", "СМС-коды и уведомления о статусе заявки")
+
+Container(pipelineAdapter, "Адаптер Кредитного конвейера", "Java 17, Spring Boot", "Онлайн-передача заявок и получение статусов")
+Container(scoringAdapter, "Адаптер скоринга", "Java 17, Spring Boot", "Один вызов скоринга на заявку, тайм-аут и предохранитель")
+Container(absAdapter, "Адаптер АБС", "Java 17, Spring Boot", "Создан в MVP депозитов. Данные клиента и зачисление средств")
+
+System(pipeline, "Кредитный конвейер", "Camunda, Oracle. Обработчики на Java")
+System(scoring, "Система кредитного скоринга", "Python, Flask, PostgreSQL")
+System(abs, "АБС", "Oracle, PL/SQL")
+
+Rel(client, siteWeb, "Условия кредита, подача заявки", "HTTPS")
+Rel(client, creditModule, "Предложение, подача заявки, СМС-код", "HTTPS")
+Rel(siteWeb, gateway, "Заявка и условия", "REST/HTTPS")
+Rel(creditModule, gateway, "Предложение и заявка", "REST/HTTPS")
+Rel(gateway, appApi, "Создание и статус заявки", "REST")
+Rel(gateway, offerApi, "Запрос предодобренного предложения", "REST")
+
+Rel(appApi, appIdem, "Проверяет дубли и активные заявки", "")
+Rel(appApi, appRegistry, "Создаёт и читает заявку", "")
+Rel(appRegistry, appDb, "Читает и пишет", "JDBC")
+Rel(appApi, appRouter, "Определяет путь обработки", "")
+Rel(appRouter, scoringAdapter, "Запрашивает скоринг по заявке", "REST")
+Rel(appRouter, pipelineAdapter, "Передаёт заявку", "REST")
+Rel(appRouter, kafka, "Публикует заявку", "credit.applications")
+Rel(appStatus, kafka, "Читает статусы", "credit.status")
+Rel(appStatus, notifySvc, "Запрашивает СМС клиенту", "REST")
+
+Rel(scoringAdapter, scoring, "Вызывает скоринг по конкретной заявке", "REST/HTTPS")
+Rel(scoringAdapter, kafka, "Публикует результат скоринга", "scoring.results")
+Rel(scoring, scoringAdapter, "Возвращает рейтинг и допустимую сумму", "REST")
+
+Rel(pipelineAdapter, pipeline, "Создаёт заявку и забирает статусы онлайн", "REST/HTTPS")
+Rel(pipelineAdapter, kafka, "Публикует статусы", "credit.status")
+
+Rel(offerConsumer, kafka, "Читает результаты скоринга", "scoring.results")
+Rel(offerConsumer, offerStore, "Сохраняет последний результат", "")
+Rel(offerStore, offerDb, "Читает и пишет", "JDBC")
+Rel(offerApi, offerTtl, "Проверяет срок годности результата", "")
+Rel(offerApi, offerCalc, "Считает сумму предложения", "")
+Rel(offerCalc, offerStore, "Берёт сохранённый скоринг", "")
+
+Rel(manager, abs, "Оформляет заявку при визите клиента", "Десктоп-клиент")
+Rel(abs, absAdapter, "Ищет ранее поданную заявку клиента", "REST/HTTPS")
+Rel(absAdapter, appApi, "Возвращает существующую заявку по клиенту", "REST")
+Rel(absAdapter, abs, "Инициирует зачисление одобренных средств", "REST/HTTPS")
+Rel(appStatus, absAdapter, "Передаёт одобренную заявку на зачисление", "REST")
+
+@enduml
