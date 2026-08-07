@@ -1,0 +1,83 @@
+@startuml
+title Диаграмма контейнеров. Открытие депозитов онлайн, MVP. Банк «Стандарт»
+
+!includeurl https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_TOP_DOWN()
+
+Person(client, "Клиент", "Действующий или новый клиент банка")
+Person(ccOperator, "Оператор кол-центра", "Обрабатывает заявки с сайта")
+Person(boDeposit, "Сотрудник бэк-офиса депозитов", "Согласует ставки, обрабатывает заявки")
+Person(boCredit, "Сотрудник бэк-офиса кредитов", "Задаёт параметры расчёта ставок")
+
+System_Boundary(siteB, "Сайт") {
+  Container(siteWeb, "Веб-приложение сайта", "PHP, React.js", "Витрина депозитов и форма заявки для нового клиента")
+}
+
+System_Boundary(ibB, "Интернет-банк") {
+  Container(ibMonolith, "Монолит интернет-банка", "ASP.NET MVC 4.5, .NET Framework 4.5", "Платежи и текущие счета. Ядро дорабатывает подрядчик, в проекте не изменяется")
+  ContainerDb(ibDb, "БД интернет-банка", "MS SQL", "Данные монолита")
+  Container(depositModule, "Депозитный модуль", "React.js, SPA", "НОВЫЙ. Витрина ставок, подача заявки, ввод СМС-кода. Встроен в интерфейс интернет-банка, ядро не затрагивает")
+}
+
+System_Boundary(platformB, "Депозитная платформа (новая)") {
+  Container(gateway, "API Gateway", "Spring Cloud Gateway", "Единая точка входа для каналов. TLS, аутентификация, ограничение частоты запросов")
+  Container(rateSvc, "Сервис ставок", "Java 17, Spring Boot", "Расчёт базовых ставок, хранение и публикация справочника, индивидуальные ставки, ролевое разделение доступа, кеш в памяти")
+  ContainerDb(rateDb, "БД ставок", "PostgreSQL", "Ставки, параметры расчёта, история изменений с автором и временем")
+  Container(rateUi, "Интерфейс управления ставками", "React.js", "Разные экраны для бэк-офиса депозитов и бэк-офиса кредитов")
+  Container(appSvc, "Сервис заявок на депозит", "Java 17, Spring Boot", "Приём заявок из каналов, идемпотентность, хранение статусов")
+  ContainerDb(appDb, "БД заявок", "PostgreSQL", "Заявки, зафиксированные условия, статусы")
+  Container(notifySvc, "Сервис уведомлений и кодов", "Java 17, Spring Boot", "Одноразовые коды подтверждения и уведомления клиенту")
+  Container(kafka, "Kafka", "Apache Kafka", "Топики deposit.applications, deposit.status, deposit.rates")
+  Container(absAdapter, "Адаптер АБС", "Java 17, Spring Boot", "Единственный компонент, работающий с АБС. Читает Kafka, вызывает интеграционный API, ограничивает нагрузку")
+}
+
+System_Boundary(absB, "АБС") {
+  Container(absClient, "Десктоп-клиент АБС", "Delphi", "Рабочее место бэк-офиса и отделений")
+  Container(absApi, "Интеграционный API АБС", "PL/SQL, REST", "НОВЫЙ. Приём заявок и выдача статусов, обёртка над процедурами. Разрабатывает команда АБС")
+  ContainerDb(absDb, "БД АБС", "Oracle", "Счета, депозиты, бухгалтерия, бизнес-логика в PL/SQL. Перегружена, масштабируется только вертикально")
+}
+
+System(callCenter, "Система кол-центра", "Платформа подрядчика: Java Spring Boot, PostgreSQL, микросервисы")
+System(smsGw, "СМС-шлюз", "Отправка СМС")
+System_Ext(telecom, "Телеком-оператор", "Внешний оператор доставки СМС")
+
+Rel(client, siteWeb, "Смотрит ставки, оставляет заявку", "HTTPS")
+Rel(client, depositModule, "Смотрит ставки, подаёт заявку, вводит СМС-код", "HTTPS")
+Rel(client, ibMonolith, "Проводит платежи, открывает текущие счета", "HTTPS")
+
+Rel(ibMonolith, ibDb, "Читает и пишет", "ADO.NET")
+Rel_R(ibMonolith, absDb, "Существующая интеграция по операциям счетов. Технический долг, в проекте не расширяется", "прямой доступ к БД")
+
+Rel(siteWeb, gateway, "Ставки и подача заявки", "REST/HTTPS")
+Rel(depositModule, gateway, "Ставки, персональная ставка, подача заявки, подтверждение кодом", "REST/HTTPS")
+Rel(rateUi, gateway, "Ввод параметров и согласование ставок", "REST/HTTPS")
+
+Rel(boCredit, rateUi, "Вводит ставку рефинансирования и уровень кредитного риска", "Веб-интерфейс")
+Rel(boDeposit, rateUi, "Согласует индивидуальную ставку. Исходные данные кредитного риска не видит", "Веб-интерфейс")
+
+Rel(gateway, rateSvc, "Запрос ставок", "REST")
+Rel(gateway, appSvc, "Создание и статус заявки", "REST")
+
+Rel(rateSvc, rateDb, "Читает и пишет", "JDBC")
+Rel(appSvc, appDb, "Читает и пишет", "JDBC")
+Rel(appSvc, rateSvc, "Фиксирует ставку в заявке", "REST")
+Rel(appSvc, notifySvc, "Запрашивает код подтверждения и уведомления", "REST")
+Rel(notifySvc, smsGw, "Отправляет СМС", "REST/HTTPS")
+Rel(smsGw, telecom, "Передаёт СМС", "Протокол оператора")
+Rel(telecom, client, "Доставляет код и уведомления", "СМС")
+
+Rel(appSvc, kafka, "Публикует подтверждённые заявки", "deposit.applications")
+Rel(rateSvc, kafka, "Публикует актуальные ставки", "deposit.rates")
+Rel(absAdapter, kafka, "Читает заявки, публикует статусы", "deposit.applications, deposit.status")
+Rel(appSvc, kafka, "Читает статусы заявок", "deposit.status")
+
+Rel(absAdapter, absApi, "Создаёт заявку, забирает статусы и подтверждённые условия", "REST/HTTPS")
+Rel(absApi, absDb, "Вызывает процедуры", "PL/SQL")
+Rel(boDeposit, absClient, "Обрабатывает заявку, подтверждает условия депозита", "Десктоп-клиент")
+Rel(absClient, absDb, "Читает и пишет", "Oracle Net")
+
+Rel(appSvc, callCenter, "Передаёт заявку нового клиента с сайта", "REST/HTTPS")
+Rel(ccOperator, callCenter, "Изучает заявку, предлагает особые условия", "Веб-интерфейс")
+
+@enduml
